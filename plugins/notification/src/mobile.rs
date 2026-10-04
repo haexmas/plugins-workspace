@@ -122,10 +122,10 @@ impl<R: Runtime> Notification<R> {
             handler: IpcChannel,
         }
         let channel = IpcChannel::new(move |body| {
-            if let InvokeResponseBody::Json(payload) = body {
-                if let Ok(performed) = serde_json::from_str::<ActionPerformed>(&payload) {
-                    handler(&performed);
-                }
+            if let InvokeResponseBody::Json(payload) = body
+                && let Ok(performed) = serde_json::from_str::<ActionPerformed>(&payload)
+            {
+                handler(&performed);
             }
             Ok(())
         });
