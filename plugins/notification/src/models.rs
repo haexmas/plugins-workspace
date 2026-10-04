@@ -721,7 +721,17 @@ impl ActionBuilder {
 pub struct ActionPerformed {
     action_id: String,
     input_value: Option<String>,
+    /// Read leniently: the platforms describe the notification differently, and an action is
+    /// still worth reporting when its notification cannot be read.
+    #[serde(default, deserialize_with = "lenient_notification")]
     notification: Option<ActiveNotification>,
+}
+
+fn lenient_notification<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<ActiveNotification>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).ok())
 }
 
 impl ActionPerformed {

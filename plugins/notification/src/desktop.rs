@@ -31,7 +31,7 @@ pub fn init<R: Runtime, C: DeserializeOwned>(
     })
 }
 
-type ActionHandler = Box<dyn Fn(&ActionPerformed) + Send + Sync>;
+type ActionHandler = Arc<dyn Fn(&ActionPerformed) + Send + Sync>;
 
 /// What the notifications of this app share: the registered action types, who listens to
 /// actions, and the shown notifications that can still be removed.
@@ -55,10 +55,12 @@ impl Shared {
                 .any(|(event, _)| event == ACTION_PERFORMED)
     }
 
-    /// Hands an action to the Rust handlers and the JavaScript listeners.
+    /// Hands an action to the Rust handlers and the JavaScript listeners. The handlers run
+    /// without a lock held, so they may register handlers or remove notifications themselves.
     fn dispatch(&self, payload: Value) {
         if let Ok(performed) = serde_json::from_value::<ActionPerformed>(payload.clone()) {
-            for handler in lock(&self.handlers).iter() {
+            let handlers = lock(&self.handlers).clone();
+            for handler in handlers {
                 handler(&performed);
             }
         }
@@ -217,7 +219,7 @@ impl<R: Runtime> Notification<R> {
         &self,
         handler: F,
     ) -> crate::Result<()> {
-        lock(&self.shared.handlers).push(Box::new(handler));
+        lock(&self.shared.handlers).push(Arc::new(handler));
         Ok(())
     }
 
@@ -456,7 +458,8 @@ mod imp {
     }
 
     /// Linux and the BSDs: the handle stays with `shared` until the notification is closed or
-    /// clicked, so `remove_active` can close it meanwhile.
+    /// clicked, so `remove_active` can close it meanwhile. The thread waits as long as the
+    /// notification server keeps the notification.
     #[cfg(all(unix, not(target_os = "macos")))]
     fn wait(notification: notify_rust::Notification, shared: Arc<Shared>, id: i32, data: Value) {
         let Ok(handle) = notification.show() else {
@@ -465,8 +468,15 @@ mod imp {
         let server_id = handle.id();
         lock(&shared.active).insert(id, Shown(handle));
         let _ = notify_rust::handle_action(server_id, |response| {
-            let shown = lock(&shared.active).remove(&id);
-            drop(shown);
+            // A later notification with the same id may have taken the entry meanwhile.
+            let mut active = lock(&shared.active);
+            if active
+                .get(&id)
+                .is_some_and(|shown| shown.0.id() == server_id)
+            {
+                active.remove(&id);
+            }
+            drop(active);
             let action = match response {
                 notify_rust::ActionResponse::Custom("default") => "tap",
                 notify_rust::ActionResponse::Custom(action) => action,
@@ -507,7 +517,7 @@ mod tests {
         assert!(!shared.has_listeners());
         let seen = Arc::new(Mutex::new(Vec::new()));
         let record = Arc::clone(&seen);
-        lock(&shared.handlers).push(Box::new(move |performed: &ActionPerformed| {
+        lock(&shared.handlers).push(Arc::new(move |performed: &ActionPerformed| {
             record.lock().unwrap().push((
                 performed.action_id().to_owned(),
                 performed.notification().map(|n| n.id()),
@@ -533,5 +543,28 @@ mod tests {
                 ("snooze".to_owned(), Some(7), Some("Standup".to_owned())),
             ]
         );
+    }
+
+    #[test]
+    fn an_unreadable_notification_still_reports_the_action() {
+        let performed: ActionPerformed = serde_json::from_value(serde_json::json!({
+            "actionId": "tap",
+            "inputValue": null,
+            "notification": { "id": "not a number" },
+        }))
+        .unwrap();
+        assert_eq!(performed.action_id(), "tap");
+        assert!(performed.notification().is_none());
+    }
+
+    #[test]
+    fn a_handler_may_register_another_handler() {
+        let shared = Arc::new(Shared::default());
+        let inner = Arc::clone(&shared);
+        lock(&shared.handlers).push(Arc::new(move |_: &ActionPerformed| {
+            lock(&inner.handlers).push(Arc::new(|_: &ActionPerformed| {}));
+        }));
+        shared.dispatch(imp::performed("tap", &Value::Null));
+        assert_eq!(lock(&shared.handlers).len(), 2);
     }
 }
