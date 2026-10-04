@@ -5,7 +5,7 @@
 use serde::{Deserialize, de::DeserializeOwned};
 use tauri::{
     AppHandle, Runtime,
-    ipc::{Channel, InvokeResponseBody},
+    ipc::{Channel as IpcChannel, InvokeResponseBody},
     plugin::{PermissionState, PluginApi, PluginHandle},
 };
 
@@ -119,9 +119,9 @@ impl<R: Runtime> Notification<R> {
         #[derive(serde::Serialize)]
         struct RegisterListener {
             event: &'static str,
-            handler: Channel,
+            handler: IpcChannel,
         }
-        let channel = Channel::new(move |body| {
+        let channel = IpcChannel::new(move |body| {
             if let InvokeResponseBody::Json(payload) = body {
                 if let Ok(performed) = serde_json::from_str::<ActionPerformed>(&payload) {
                     handler(&performed);
